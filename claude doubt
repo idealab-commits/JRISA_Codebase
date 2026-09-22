@@ -1,322 +1,42 @@
-Here's the exact, ordered sequence — each step has a copy-paste prompt for Cursor, plus a STOP AND CHECK marker wherever blind automation would be risky (annotation format, GPU memory, convergence) since those genuinely need your eyes before proceeding.
+Write a Cursor prompt for the JRISA codebase. The agent must not change model
+architecture, loss equations, or Algorithms 1–3. It may only fix the
+data-augmentation shape bug described below, then rerun the existing pilot.
 
-Task 1 — Environment setup
-
-Prompt for Cursor:
-
-Open this JRISA_Codebase project. Create a Python virtual environment named
-"venv", activate it, and install everything in requirements.txt. Then run
-`python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"`
-and show me the output. Do not modify any project files in this step.
-
-✅ Check before continuing: output must say True and name your RTX 5060 Ti / 5090. If False, stop — PyTorch installed the CPU-only build; fix that first (pip install torch --index-url https://download.pytorch.org/whl/cu121 or the CUDA version matching your driver).
-
-Task 2 — Download datasets
-
-Prompt for Cursor:
-
-Run scripts/download_datasets.py with --dataset all --output-dir ./data.
-Show me the full console output, including any errors or manual-step
-instructions it prints (especially for AC3 and MitoEM). Do not edit the
-script's AC3_CHANNEL variable yourself — just report what it tells me to do.
-
-🛑 STOP AND CHECK: read the AC3 and MitoEM instructions it prints. You must manually resolve the AC3 channel name (via bossDB's site) and manually register/download MitoEM before continuing — do not let Cursor guess these.
-
-Task 3 — Inspect raw downloaded data BEFORE writing any conversion code
-
-Prompt for Cursor:
-
-Inspect every file that was downloaded into ./data/cremi and ./data/ac3_ac4.
-For each file, tell me: file format/extension, shape (if it's an array),
-dtype, and — critically — for any file that looks like ground-truth
-annotations, run np.unique() on it and tell me how many distinct positive
-values it contains. Do not write any conversion or training code yet —
-just report findings.
-
-🛑 STOP AND CHECK: this is the single most important checkpoint. If any annotation file shows only 1–2 unique positive values across a large volume, it's likely semantic-only, not instance-labeled — do not proceed to training with it. Come back and tell me what it finds before the next step.
-
-Task 4 — Write the conversion script (only after Task 3's findings are known)
-
-Prompt for Cursor (fill in <FORMAT DETAILS FROM TASK 3> with what it found):
-
-Based on this file format information: <FORMAT DETAILS FROM TASK 3>, write
-a script scripts/convert_to_npy.py that converts the raw downloaded CREMI
-and AC3/AC4 data into the exact layout src/train.py expects: for each
-volume, save <name>_raw.npy (float array) and <name>_labels.npy (int array,
-0=background, distinct positive integers per instance) into ./data/cremi
-and ./data/ac3_ac4 respectively. Do not guess at label semantics — if
-anything is ambiguous, stop and ask me rather than assuming.
-
-Then run it and re-verify with Task 3's inspection approach on the output .npy files.
-
-Task 5 — Pilot smoke test (mandatory before full training)
-
-Prompt for Cursor:
-
-Run exactly this command and show me the full output, including any
-errors:
-python src/train.py --data-dir ./data/ac3_ac4 --dataset ac3ac4 \
-    --config-name full --seed 0 --out-dir ./runs/pilot \
-    --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
-Do not change any arguments. If it errors, show me the full traceback and
-do not attempt to fix it yourself yet — report it to me first.
-
-🛑 STOP AND CHECK: open runs/pilot/train_log.jsonl and confirm train_loss is decreasing across the 10 logged epochs. If it's flat or NaN, do not proceed — something's wrong (likely from Task 3/4) and needs fixing before full training.
-
-Task 6 — Full training runs (only after Task 5 passes)
-
-Prompt for Cursor (run once per config/seed combination — do NOT batch these into one auto-loop without supervision, since each run is 3–7+ hours and you want to catch failures early):
-
-Run exactly this command and let it run to completion, showing progress
-periodically:
-python src/train.py --data-dir ./data/ac3_ac4 --val-data-dir ./data/ac3_ac4 \
-    --dataset ac3ac4 --config-name full --seed 0 \
-    --out-dir ./runs/ac3ac4_full_seed0 \
-    --max-epochs 600 --iterations-per-epoch 100 --early-stop-patience 50
-Do not modify arguments. If GPU memory errors occur, report the exact error
-to me rather than silently reducing batch size yourself.
-
-Repeat for each --config-name in {iso_only, ani_only, ani_iso_semantic_only, full, full_afg} and each --seed (per your mixed n=3/n=5 strategy), changing only --config-name, --seed, and --out-dir each time.
-
-Task 7 — Inference
-
-Prompt for Cursor (after each training run finishes):
-
-Run exactly:
-python src/infer.py --checkpoint ./runs/ac3ac4_full_seed0/best.pt \
-    --volume ./data/ac3_ac4/ac4_raw.npy --dataset ac3ac4 \
-    --out-dir ./predictions/full_seed0/ac4
-Show me the output, including the reported instance count.
-Task 8 — Evaluation
-
-Prompt for Cursor (once all configs/seeds have predictions):
-
-Run exactly:
-python src/evaluate.py --pred-root ./predictions --gt-dir ./data/ac3_ac4 \
-    --configs iso_only ani_only ani_iso_semantic_only full full_afg \
-    --seeds 0 1 2 3 4 --samples ac4 --out results_ac3ac4.json
-Show me the full contents of results_ac3ac4.json when done.
-The one instruction to give Cursor at the very start of every session
-This is a research codebase for a manuscript's experimental results. Do not
-refactor, "improve," or change any equation/algorithm logic in src/ without
-explicitly telling me what you changed and why — the code must match the
-manuscript's Algorithms 1-3 exactly. If something errors, report the error
-and wait for my instruction rather than silently patching around it.
-
-This last one matters most for "no mistakes" — Cursor's agent mode will happily "fix" things by changing your loss function or architecture if it hits an error, which would silently break the correspondence between your code and your paper's equations.
-
-and also for the training put checkpoints
-
-Task 1 passed. Tasks 2 and 3 are done through inspection only. I did not write a conversion script, and I did not change anything under src/.
-
-Task 1 — environment
-Virtual environment: JRISA_Codebase\venv (Python 3.12).
-
-requirements.txt first installed CPU-only PyTorch (2.14.0+cpu, CUDA False). CUDA 12.1 does not include RTX 5060 Ti (Blackwell) kernels, so I reinstalled the CUDA build that matches driver 591.86:
-
-2.14.0+cu130
-True NVIDIA GeForce RTX 5060 Ti
-cuda 13.0
-Task 2 — download
-CREMI downloaded. AC4 saved as a raw array. AC3 was not downloaded. MitoEM was not downloaded.
-
-AC3 — you have to set the channel. I did not edit AC3_CHANNEL.
-
-Open https://bossdb.org/project/kasthuri2015
-Identify the AC3 collection/channel (the script says it is not the same as the ac4 channel bossdb://kasthuri2015/em/cc).
-Set AC3_CHANNEL in scripts/download_datasets.py and re-run: python download_datasets.py --dataset ac3ac4 --output-dir ./data
-The script also says this fetch is raw EM only. Instance/synapse ground truth is a separate bossDB channel.
-
-MitoEM — manual registration. No public API. Register at https://mitoem.grand-challenge.org/ and place files like this:
-
-data/mitoem/mito_r/im/ and data/mitoem/mito_r/mito-labels/
-data/mitoem/mito_h/im/ and data/mitoem/mito_h/mito-labels/
-MitoEM is only for the zero-shot evaluation pass, not for train.py. Instructions were also written to data/mitoem/README_MANUAL_DOWNLOAD.txt.
-
-Task 3 — what is actually on disk
-CREMI (data/cremi/train/sample_{A,B,C}.hdf), each with the same layout:
-
-Dataset	Shape	dtype	Distinct positive values
-volumes/raw
-(125, 1250, 1250)
-uint8
-image intensities, not labels
-volumes/labels/neuron_ids
-(125, 1250, 1250)
-uint64
-A: 37,366 · B: 1,309 · C: 1,978
-volumes/labels/clefts
-(125, 1250, 1250)
-uint64
-A: 124 · B: 132 · C: 166
-annotations/ids
-1-D
-uint64
-one id per synaptic site (432 / 1,268 / 2,230)
-annotations/types
-1-D
-bytes
-only presynaptic_site and postsynaptic_site
-annotations/presynaptic_site/partners
-(N, 2)
-uint64
-partner id pairs
-annotations/locations
-(N, 3)
-float32
-point coordinates
-These volume labels are not semantic 1–2 class maps. neuron_ids and clefts use many distinct positive ids. Two label details that matter before any conversion:
-
-Neither neuron_ids nor clefts contains 0. There is no zero background in those volumes.
-Every clefts volume includes the sentinel 18446744073709551615 (2^64 - 1), which is CREMI’s unlabeled marker, counted inside the positive-value totals above.
-Sample A’s neuron_ids has 37,366 ids, far more than B or C. That is still an instance id volume, but it is much more fragmented.
-AC3/AC4 (data/ac3_ac4/ac4_em.npy only):
-
-.npy, shape (100, 1024, 1024), dtype uint8
-np.unique is only [0] — the whole volume is zeros
-There is no AC3 file and no annotation file in this folder
-Do not train on ac4_em.npy as it stands. The pilot command in Task 5 points at ./data/ac3_ac4, and that folder has no *_raw.npy / *_labels.npy pair and no usable AC4 image.
-
-Checkpoints
-src/train.py already writes checkpoints without any change from me: last.pt after every epoch, and best.pt when validation loss improves. I have not altered that logic.
-
-I am stopped here, before any conversion or training code. Send the AC3 channel name (and the annotation channel, if you have it) when you want the download re-run.
-
-is the available data enough for now?
-
-No. What is on disk is not enough to start the AC3/AC4 pilot or full training.
-
-train.py only loads <name>_raw.npy and <name>_labels.npy pairs. Those files do not exist. The commands in your sequence all point at ./data/ac3_ac4, and that folder cannot be used:
-
-ac4_em.npy is shape (100, 1024, 1024) and every voxel is 0.
-There is no AC3 volume.
-There are no instance labels, so BCD targets cannot be built.
-CREMI is the only real data. sample_A/B/C.hdf each have a raw volume plus instance-style neuron_ids (1,309–37,366 ids) and clefts (124–166 ids). That is enough to convert and smoke-test a CREMI run later. It is not in the .npy layout training expects, and it does not replace AC3/AC4.
-
-MitoEM is still empty. That only blocks the later zero-shot evaluation, not training.
-
-Training stays blocked until AC4 is a real EM volume and you have instance labels (0 = background, one positive integer per instance) for the volumes you want to train on.
-
-ok then is cremi enough for starting the training?
-
-
-
-
-
-
-
-
-gimme all the checklists of the dataset and what exactly (quantity) we will be training witht the time it takes
-
-The only trainable set is CREMI, and the pilot never finished a single step, so GPU epoch time is still unknown. Startup for all three volumes was measured at about 15 minutes.
-
-Dataset checklist
-Dataset	On disk	Usable for training	Why
-CREMI A, B, C
-Yes, converted
-Yes, once the batch-shape crash is fixed
-Instance labels from neuron_ids
-AC4
-ac4_em.npy only
-No
-Entire volume is 0. No labels
-AC3
-Not downloaded
-No
-Channel name was never set
-AC3/AC4 annotations
-None
-No
-Separate bossDB channel, not fetched
-MitoEM-R / MitoEM-H
-Empty folders
-No
-Manual download. Evaluation only, never trained on
-What the CREMI run actually trains on
-train.py loads every *_raw.npy / *_labels.npy pair in --data-dir. The pilot used ./data/cremi, so it trains on all three volumes. Nothing is held out. No --val-data-dir was set, so there is no validation loss, no best.pt, and early stopping never triggers. last.pt is written only after an epoch finishes. None was written.
-
-Volume	Voxels	Raw	Labels	Instance ids
-sample A
-125 × 1250 × 1250 = 195,312,500
-float32, 0–255
-int32, ids 1…37,366
-37,366
-sample B
-same 195,312,500
-float32, 0–253
-int32, ids 1…1,309
-1,309
-sample C
-same 195,312,500
-float32, 0–255
-int32, ids 1…1,978
-1,978
-Total
-585,937,500 voxels
-~2.2 GB
-~2.2 GB
-40,653 instances
-There is no background. Every voxel belongs to an instance, so the foreground target is 1 everywhere.
-
-Each CREMI patch is 16 × 384 × 320 (1,966,080 voxels). Patches are random crops, not a full pass over the volume.
-
-Run	Epochs	Steps per epoch	Patches per epoch	Patches in the whole run
-Pilot that was launched (full, seed 0)
-10
-20
-40 (batch size 2)
-400
-One full run at the code defaults
-600
-100
-200
-120,000
-The manuscript plan is 5 configs (iso_only, ani_only, ani_iso_semantic_only, full, full_afg) times the seeds you choose. At 5 seeds that is 25 runs × 120,000 patches. At 3 seeds it is 15 runs.
-
-Time
-Stage	Time	Basis
-Build boundary and distance maps for A+B+C
-~15 min, once per run, before epoch 0
-Measured. Sample B alone was 4 min 51 sec
-One training step
-Not measured
-The run died on the first batch
-10-epoch pilot
-Not measured
-0 epochs completed
-One 600-epoch run
-Not measured
-Needs one finished epoch first
-15 or 25 full runs
-Not measured
-Same
-The crash is the 90° rotation on a non-square 384×320 patch, so a batch contains both [1, 16, 384, 320] and [1, 16, 320, 384] and cannot be stacked. Until that is fixed, training time stays at the 15-minute setup plus an immediate failure.
-
-what exactly do u want from me?
-
-so that i can ask claude and it can give u a proper prompt for it!
-
-I need one decision from you, and Claude needs the facts below so the prompt does not let me change the model or the loss.
-
-The decision: how to fix the crash. CREMI patches are 16×384×320. A 90° or 270° rotation swaps 384 and 320, so one batch contains both shapes and torch.stack fails. Pick one:
-
-Keep flips, and allow only 0° and 180° rotations (shape stays 384×320).
-Keep flips only. No rotation.
-That is the only thing blocking the next run. I will not change src/model.py or src/losses.py.
-
-Paste this to Claude:
-
-Write a Cursor prompt for the JRISA codebase. The agent must not change model architecture, loss equations, or Algorithms 1–3. It may only fix the data-augmentation shape bug described below, then rerun the existing pilot.
 Facts:
-- Trainable data is CREMI only: data/cremi/sample_{A,B,C}_raw.npy and sample_{A,B,C}_labels.npy.
-- Each volume is (125, 1250, 1250). Labels are neuron instance ids, remapped to 1..K, with no background voxel. Counts: A 37366, B 1309, C 1978.
+- Trainable data is CREMI only: data/cremi/sample_{A,B,C}_raw.npy and
+  sample_{A,B,C}_labels.npy.
+- Each volume is (125, 1250, 1250). Labels are neuron instance ids, remapped
+  to 1..K, with no background voxel. Counts: A 37366, B 1309, C 1978.
 - AC3, AC4, and MitoEM are not usable. Do not download or invent them.
 - Pilot command that already reached the GPU, then crashed before epoch 0:
   python src/train.py --data-dir ./data/cremi --dataset cremi --config-name full --seed 0 --out-dir ./runs/pilot --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
-- Crash: RuntimeError: stack expects each tensor to be equal size, but got [1, 16, 320, 384] at entry 0 and [1, 16, 384, 320] at entry 1.
-- Cause: src/data.py _augment applies np.rot90 on lateral axes of a non-square 384×320 patch.
-- Chosen fix: <PASTE OPTION 1 OR 2 HERE>.
-- After the fix, rerun that same pilot. Do not start the 600-epoch runs.
-- Report the full traceback if it fails again. If it finishes, show runs/pilot/train_log.jsonl and whether train_loss decreased across the 10 epochs.
-- Checkpoints: last.pt is written each epoch. best.pt is written only when --val-data-dir is set. This pilot has no val dir, so only last.pt is expected.
+- Crash: RuntimeError: stack expects each tensor to be equal size, but got
+  [1, 16, 320, 384] at entry 0 and [1, 16, 384, 320] at entry 1.
+- Cause: src/data.py _augment applies np.rot90 on lateral axes of a
+  non-square 384x320 patch; a 90 or 270 degree rotation swaps H and W,
+  producing a batch with mixed shapes.
 
+Chosen fix: in the _augment staticmethod in src/data.py, restrict the
+rotation step so it is SHAPE-AWARE:
+  - If the patch's lateral dimensions (H, W) are equal (square, e.g. the
+    16x320x320 AC3/AC4/MitoEM patch shape), keep the existing behavior:
+    k = np.random.randint(0, 4)  # allows 0, 90, 180, 270 degrees
+  - If H != W (non-square, e.g. CREMI's 16x384x320), restrict rotation to
+    shape-preserving angles only:
+    k = np.random.choice([0, 2])  # 0 or 180 degrees only, via np.rot90(..., k)
+  Keep both flip operations (axis=1, axis=2) unchanged in both cases -- flips
+  never change H/W shape, so they are not part of the bug and do not need
+  restriction.
+  Do not touch anything else in data.py, and do not touch model.py,
+  losses.py, decode.py, metrics.py, train.py, infer.py, or evaluate.py.
+
+- After the fix, rerun that same pilot command exactly as given above. Do
+  not start the 600-epoch runs.
+- Report the full traceback if it fails again. If it finishes, show
+  runs/pilot/train_log.jsonl and tell me whether train_loss decreased across
+  the 10 logged epochs.
+- Checkpoints: last.pt is written each epoch. best.pt is written only when
+  --val-data-dir is set. This pilot has no val dir, so only last.pt is
+  expected -- confirm it exists in runs/pilot/ after the run.
+- Show me the exact diff of the change to src/data.py before considering
+  this task complete.
