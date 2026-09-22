@@ -1,45 +1,50 @@
-The log finished all 10 epochs, so last.pt should have been written every epoch. I’ll list runs\pilot directly and confirm which directory the process was using.
+Before you proceed, there are two corrections needed to Cursor's proposed plan — both matter for "no mistakes," since both would silently break your comparability claim if left as-is.
 
-last.pt is there. The earlier file search missed it.
+Correction 1: Don't hold out a whole volume — this isn't what your manuscript specifies
 
-The process was started in C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase, and --out-dir ./runs/pilot resolved to that folder. The console ends with Training complete and exit code 0. There is no permission, disk-full, or torch.save error after the epoch lines. About 41 GB is still free.
+Cursor's plan (train on 2 volumes, validate on the 3rd) deviates from Section III-I's actual established protocol: each volume (A, B, C) is split by z-slice — first 70 sections train, middle 30 validation, last 25 test, per volume, not whole-volume holdout. Whole-volume holdout would mean your reported numbers no longer match the split [26]/[18] used, which breaks the exact comparability your whole evaluation depends on. This needs fixing in the data-loading step before any full run.
 
-Directory of C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\runs\pilot
-09/22/2026  05:26 PM    <DIR>          .
-09/22/2026  04:06 PM    <DIR>          ..
-09/22/2026  05:41 PM        61,383,641 last.pt
-09/22/2026  05:41 PM             1,266 train_log.jsonl
-               2 File(s)     61,384,907 bytes
-last.pt is 61,383,641 bytes, written at 5:41 PM, the same minute the log was last updated. best.pt is absent because this pilot had no validation directory, so that save never runs.
+Correction 2: CREMI's instance/semantic target should be clefts (synapses), not neuron_ids
 
+This is the deeper issue. neuron_ids has no background (every voxel belongs to some neuron) — that's not a bug, it's just the wrong label for your task. Your baselines ([26] ReIsoSeg specifically) evaluate CREMI on synapse/cleft segmentation, not generic neuron segmentation. Using neuron_ids tests a completely different task than what your comparison claims are about. The correct target is clefts — which does have real background (most voxels aren't synapses) and matches what [26] actually reports numbers on.
 
+One more detail: clefts contains the sentinel value 18446744073709551615 for "unlabeled" — this must be mapped to background (0), not treated as a real instance, before generating BCD labels.
 
+Exact Cursor prompt to implement both corrections
+Switch to Agent mode. Do not touch model.py, losses.py, decode.py, metrics.py,
+train.py's training loop, or Algorithms 1-3 logic. This is a data-source and
+data-splitting correction only.
 
+Correction A -- use the right label source:
+In the CREMI conversion script (or wherever sample_{A,B,C}_labels.npy are
+produced), change the label source from volumes/labels/neuron_ids to
+volumes/labels/clefts. Before saving, replace every voxel equal to
+18446744073709551615 (the CREMI "unlabeled" sentinel, 2^64-1) with 0
+(background). Then remap the remaining distinct positive values to a dense
+1..K range. Report the new instance count per volume after this change --
+it should be much smaller than the neuron_ids counts (recall: clefts had
+124/132/166 distinct positive values per volume, close to what a synapse
+count should look like, versus neuron_ids' 37366/1309/1978).
 
+Correction B -- per-volume z-slice split, not whole-volume holdout:
+Modify how train.py's load_volumes (or a new loader) assigns data: for each
+of sample_A, sample_B, sample_C (raw + corrected clefts-based labels),
+split along the z axis (the first dimension, size 125) into:
+  - z[0:70]   -> training
+  - z[70:100] -> validation
+  - z[100:125] -> test
+Do this for ALL THREE volumes (not one held-out volume) -- training data is
+the concatenation of all three volumes' [0:70] slices, validation is the
+concatenation of all three volumes' [70:100] slices, test is all three
+volumes' [100:125] slices. Save these as separate directories:
+  data/cremi_train/   (for --data-dir)
+  data/cremi_val/     (for --val-data-dir)
+  data/cremi_test/    (for infer.py / evaluate.py later)
+Report the final shape of each split's saved arrays.
 
+Do not start any training run yet. After both corrections, rerun the BCD
+label generation step only (not the full pilot) and confirm it completes
+without error on the new clefts-based labels for at least one volume. Show
+me the instance counts and z-split shapes before I decide on the next step.
 
-
-
-
-
-
-what must be done now?
-
-no mistakes!!
-
-The pilot met the loss check. I’ll confirm what the evaluation code still requires before saying what has to happen next.
-
-The pilot gate is passed. train_loss went from 21.43 to 12.15, it was not flat or NaN, and runs/pilot/last.pt is a real 61 MB checkpoint. Do not start the AC3/AC4 full-training commands. Those volumes are still missing or all zeros.
-
-What has to happen before any 600-epoch run:
-
-Hold one CREMI volume out. load_volumes trains on every *_raw.npy in the folder. Right now that is A, B, and C together, so a full run would train on the volume you later want to test. best.pt is also never written unless --val-data-dir points at a different folder. The pilot only has last.pt for that reason.
-
-You name the held-out volume. I should not pick A, B, or C for you. Training then uses the other two, and validation uses the one you hold out. That is also the volume inference and evaluation use.
-
-Run one config, one seed, and watch it. The first full command, after the split exists, is full with seed 0 only. From the pilot, a later epoch of 20 steps took about 90 seconds, so 100 steps is about 7–8 minutes per epoch. At 600 epochs with no early stop, that one run is about 3 days. Early stopping can cut it only if the validation directory is set. Do not start the other four configs or the other seeds until this run has written best.pt and its loss is still sane.
-
-Do not run evaluation yet. evaluate.py requires <name>_sem_gt.npy next to the instance labels. That file was never created. CREMI neuron_ids has no background voxel, so a semantic map made with labels > 0 would be foreground everywhere and the Dice score would be meaningless. That mapping has to be decided before evaluation, not invented during it.
-
-MitoEM is still not required for this training.
-
+Run this first, confirm the reported numbers make sense (small clefts-based instance counts, correct split shapes), then come back and I'll give you the exact command for the first real training run (full, seed 0, with --val-data-dir now properly set).
