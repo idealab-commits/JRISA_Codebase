@@ -199,3 +199,124 @@ Training stays blocked until AC4 is a real EM volume and you have instance label
 
 ok then is cremi enough for starting the training?
 
+
+
+
+
+
+
+
+gimme all the checklists of the dataset and what exactly (quantity) we will be training witht the time it takes
+
+The only trainable set is CREMI, and the pilot never finished a single step, so GPU epoch time is still unknown. Startup for all three volumes was measured at about 15 minutes.
+
+Dataset checklist
+Dataset	On disk	Usable for training	Why
+CREMI A, B, C
+Yes, converted
+Yes, once the batch-shape crash is fixed
+Instance labels from neuron_ids
+AC4
+ac4_em.npy only
+No
+Entire volume is 0. No labels
+AC3
+Not downloaded
+No
+Channel name was never set
+AC3/AC4 annotations
+None
+No
+Separate bossDB channel, not fetched
+MitoEM-R / MitoEM-H
+Empty folders
+No
+Manual download. Evaluation only, never trained on
+What the CREMI run actually trains on
+train.py loads every *_raw.npy / *_labels.npy pair in --data-dir. The pilot used ./data/cremi, so it trains on all three volumes. Nothing is held out. No --val-data-dir was set, so there is no validation loss, no best.pt, and early stopping never triggers. last.pt is written only after an epoch finishes. None was written.
+
+Volume	Voxels	Raw	Labels	Instance ids
+sample A
+125 × 1250 × 1250 = 195,312,500
+float32, 0–255
+int32, ids 1…37,366
+37,366
+sample B
+same 195,312,500
+float32, 0–253
+int32, ids 1…1,309
+1,309
+sample C
+same 195,312,500
+float32, 0–255
+int32, ids 1…1,978
+1,978
+Total
+585,937,500 voxels
+~2.2 GB
+~2.2 GB
+40,653 instances
+There is no background. Every voxel belongs to an instance, so the foreground target is 1 everywhere.
+
+Each CREMI patch is 16 × 384 × 320 (1,966,080 voxels). Patches are random crops, not a full pass over the volume.
+
+Run	Epochs	Steps per epoch	Patches per epoch	Patches in the whole run
+Pilot that was launched (full, seed 0)
+10
+20
+40 (batch size 2)
+400
+One full run at the code defaults
+600
+100
+200
+120,000
+The manuscript plan is 5 configs (iso_only, ani_only, ani_iso_semantic_only, full, full_afg) times the seeds you choose. At 5 seeds that is 25 runs × 120,000 patches. At 3 seeds it is 15 runs.
+
+Time
+Stage	Time	Basis
+Build boundary and distance maps for A+B+C
+~15 min, once per run, before epoch 0
+Measured. Sample B alone was 4 min 51 sec
+One training step
+Not measured
+The run died on the first batch
+10-epoch pilot
+Not measured
+0 epochs completed
+One 600-epoch run
+Not measured
+Needs one finished epoch first
+15 or 25 full runs
+Not measured
+Same
+The crash is the 90° rotation on a non-square 384×320 patch, so a batch contains both [1, 16, 384, 320] and [1, 16, 320, 384] and cannot be stacked. Until that is fixed, training time stays at the 15-minute setup plus an immediate failure.
+
+what exactly do u want from me?
+
+so that i can ask claude and it can give u a proper prompt for it!
+
+I need one decision from you, and Claude needs the facts below so the prompt does not let me change the model or the loss.
+
+The decision: how to fix the crash. CREMI patches are 16×384×320. A 90° or 270° rotation swaps 384 and 320, so one batch contains both shapes and torch.stack fails. Pick one:
+
+Keep flips, and allow only 0° and 180° rotations (shape stays 384×320).
+Keep flips only. No rotation.
+That is the only thing blocking the next run. I will not change src/model.py or src/losses.py.
+
+Paste this to Claude:
+
+Write a Cursor prompt for the JRISA codebase. The agent must not change model architecture, loss equations, or Algorithms 1–3. It may only fix the data-augmentation shape bug described below, then rerun the existing pilot.
+Facts:
+- Trainable data is CREMI only: data/cremi/sample_{A,B,C}_raw.npy and sample_{A,B,C}_labels.npy.
+- Each volume is (125, 1250, 1250). Labels are neuron instance ids, remapped to 1..K, with no background voxel. Counts: A 37366, B 1309, C 1978.
+- AC3, AC4, and MitoEM are not usable. Do not download or invent them.
+- Pilot command that already reached the GPU, then crashed before epoch 0:
+  python src/train.py --data-dir ./data/cremi --dataset cremi --config-name full --seed 0 --out-dir ./runs/pilot --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
+- Crash: RuntimeError: stack expects each tensor to be equal size, but got [1, 16, 320, 384] at entry 0 and [1, 16, 384, 320] at entry 1.
+- Cause: src/data.py _augment applies np.rot90 on lateral axes of a non-square 384×320 patch.
+- Chosen fix: <PASTE OPTION 1 OR 2 HERE>.
+- After the fix, rerun that same pilot. Do not start the 600-epoch runs.
+- Report the full traceback if it fails again. If it finishes, show runs/pilot/train_log.jsonl and whether train_loss decreased across the 10 epochs.
+- Checkpoints: last.pt is written each epoch. best.pt is written only when --val-data-dir is set. This pilot has no val dir, so only last.pt is expected.
+
