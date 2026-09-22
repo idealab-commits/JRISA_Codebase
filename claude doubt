@@ -1,47 +1,52 @@
-This prompt is ready to run, but Ask mode is still on, so I cannot edit src/data.py or start the pilot. Switch to Agent mode and send the same prompt again.
+Diagnosis: generate_bcd_labels in data.py computes the distance transform on the full-size volume (125×1250×1250) separately for every single instance — and sample A alone has 37,366 instances. SciPy's distance_transform_edt allocates a full-volume-sized working array each call, so it's not just slow (37,366 full-volume passes), it's also why the very first call already blew past available RAM. The bug isn't the shape fix — it's that this function never crops to each instance's bounding box before processing.
 
-The only edit it will make is in _augment in src/data.py, replacing the unconditional k = np.random.randint(0, 4) with:
+The fix: crop to each instance's bounding box (via scipy.ndimage.find_objects), run erosion/distance-transform on that small crop only, then write the result back into the correct offset of the full-size output array. This fixes both the memory error and what would otherwise be a very slow function (tens of thousands of full-volume operations reduced to tens of thousands of small-crop operations).
 
-if raw.shape[1] == raw.shape[2]:
-    k = np.random.randint(0, 4)
-else:
-    k = int(np.random.choice([0, 2]))
-Flips stay as they are. Square patches still rotate by 0°, 90°, 180°, or 270°. CREMI’s 384×320 patches rotate by 0° or 180° only. Then the same 10-epoch pilot command runs again.
+Here's the exact Cursor prompt:
 
-yes i switched ask mode off, now u can resume editing 
+Switch to Agent mode if not already on. The prompt is ready to run.
 
-The rotation change is in place. The pilot did not finish: it ran out of memory while building distance maps, before any epoch was logged. No last.pt was written.
+Fix a memory bug in generate_bcd_labels() in src/data.py. Do not touch
+model.py, losses.py, decode.py, metrics.py, train.py, infer.py, or
+evaluate.py. Do not change the function's inputs, outputs, or the meaning
+of B/C/D channels -- only change HOW they are computed internally.
 
-The only edit in _augment is this:
+Current bug: for every distinct instance id in instance_labels, the function
+calls binary_erosion(mask) and distance_transform_edt(mask) where mask is
+the SAME SIZE AS THE FULL VOLUME (e.g. 125x1250x1250), even though each
+instance only occupies a small region of it. With 37,366 instances in one
+CREMI volume, this means 37,366 full-volume distance-transform calls, each
+allocating large temporary arrays -- this is what caused the
+ArrayMemoryError (trying to allocate 4.37 GiB) and would also make this
+function extremely slow even if memory were not an issue.
 
+Required fix: use scipy.ndimage.find_objects(instance_labels) to get each
+instance's bounding-box slice ONCE (a single call returns all bounding
+boxes). For each instance id:
+  1. Get its bounding box slice tuple from the find_objects result.
+  2. Pad that bounding box by 1 voxel on each side (clipped to the volume's
+     actual bounds) so erosion/distance-transform near the crop edge is
+     still correct.
+  3. Extract the small cropped sub-volume: crop = instance_labels[padded_slice]
+  4. Compute mask = (crop == inst_id) on this SMALL crop only.
+  5. Run binary_erosion(mask) and distance_transform_edt(mask) on this small
+     crop -- not the full volume.
+  6. Write the resulting small contour and distance values into the
+     corresponding location of the full-size `contour` and `dist_map`
+     output arrays, using the same padded_slice offset. For contour, use
+     logical OR with whatever is already there (in case of adjacent
+     bounding boxes overlapping at the padding border). For dist_map, use
+     np.maximum with whatever is already there, not += (avoid double-adding
+     in any overlapping padded regions).
 
-data.py
-Ln 196–201
-# 90/270 deg swaps H and W. Square patches can use all four angles;
-# non-square patches (CREMI 384x320) stay at 0 or 180 so a batch stacks.
-if raw.shape[1] == raw.shape[2]:
-    k = np.random.randint(0, 4)
-else:
-    k = int(np.random.choice([0, 2]))
-Both flips are unchanged. Square patches still use k in {0, 1, 2, 3}. Non-square patches use k in {0, 2} only. Nothing else in this step was edited.
-
-Full traceback:
-
-Traceback (most recent call last):
-  File "C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\src\train.py", line 218, in <module>
-    main()
-  File "C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\src\train.py", line 146, in main
-    train_ds = EMVolumeDataset(train_volumes, patch_size=patch_size,
-  File "C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\src\data.py", line 134, in __init__
-    b, c, d = generate_bcd_labels(v["labels"])
-  File "C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\src\data.py", line 105, in generate_bcd_labels
-    dist = distance_transform_edt(mask)
-  File "...\scipy\ndimage\_morphology.py", line 2588, in distance_transform_edt
-    dt = dt.astype(np.float64)
-numpy._core._exceptions._ArrayMemoryError: Unable to allocate 4.37 GiB for an array with shape (3, 125, 1250, 1250) and data type float64
-That allocation is one distance transform whose bounding box is essentially the whole volume: SciPy builds a 3-channel float64 array of shape (3, 125, 1250, 1250). With A and B already held in memory, that extra 4.37 GB did not fit in 32 GB. This is not the shape-stacking bug. I did not change the distance-transform code or start the 600-epoch runs.
-
-
-
-
-The 10-epoch CREMI pilot failed again before any epoch was logged, so runs/pilot/last.pt was not written. The rotation fix is in place. This crash is a memory error: one distance transform tried to allocate 4.37 GB on top of the volumes already loaded, and the process ran out of RAM.
+After the fix:
+- Rerun the exact same 10-epoch pilot command as before:
+  python src/train.py --data-dir ./data/cremi --dataset cremi --config-name full --seed 0 --out-dir ./runs/pilot --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
+- Report how long the BCD label pre-computation step took this time (it
+  should now be much faster than before, not slower).
+- Show the full traceback if it fails again.
+- If it finishes, show runs/pilot/train_log.jsonl and tell me whether
+  train_loss decreased across the 10 logged epochs, and confirm
+  runs/pilot/last.pt now exists.
+- Show me the exact diff of the change to src/data.py before considering
+  this complete.
