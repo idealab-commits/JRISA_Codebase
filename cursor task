@@ -11,3 +11,35 @@ Directory of C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\runs\pilot
 09/22/2026  05:41 PM             1,266 train_log.jsonl
                2 File(s)     61,384,907 bytes
 last.pt is 61,383,641 bytes, written at 5:41 PM, the same minute the log was last updated. best.pt is absent because this pilot had no validation directory, so that save never runs.
+
+
+
+
+
+
+
+
+
+
+
+
+what must be done now?
+
+no mistakes!!
+
+The pilot met the loss check. I’ll confirm what the evaluation code still requires before saying what has to happen next.
+
+The pilot gate is passed. train_loss went from 21.43 to 12.15, it was not flat or NaN, and runs/pilot/last.pt is a real 61 MB checkpoint. Do not start the AC3/AC4 full-training commands. Those volumes are still missing or all zeros.
+
+What has to happen before any 600-epoch run:
+
+Hold one CREMI volume out. load_volumes trains on every *_raw.npy in the folder. Right now that is A, B, and C together, so a full run would train on the volume you later want to test. best.pt is also never written unless --val-data-dir points at a different folder. The pilot only has last.pt for that reason.
+
+You name the held-out volume. I should not pick A, B, or C for you. Training then uses the other two, and validation uses the one you hold out. That is also the volume inference and evaluation use.
+
+Run one config, one seed, and watch it. The first full command, after the split exists, is full with seed 0 only. From the pilot, a later epoch of 20 steps took about 90 seconds, so 100 steps is about 7–8 minutes per epoch. At 600 epochs with no early stop, that one run is about 3 days. Early stopping can cut it only if the validation directory is set. Do not start the other four configs or the other seeds until this run has written best.pt and its loss is still sane.
+
+Do not run evaluation yet. evaluate.py requires <name>_sem_gt.npy next to the instance labels. That file was never created. CREMI neuron_ids has no background voxel, so a semantic map made with labels > 0 would be foreground everywhere and the Dice score would be meaningless. That mapping has to be decided before evaluation, not invented during it.
+
+MitoEM is still not required for this training.
+
