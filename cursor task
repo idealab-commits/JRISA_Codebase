@@ -1,85 +1,16 @@
-The pilot split was wrong for the manuscript: each CREMI volume is cut by z-slice, and the training target is clefts, with the unlabeled sentinel mapped to background. I’ll change only the conversion and the split, then run BCD on the new labels without starting training.
+Good — that's a real, trustworthy number now: ~72 hours (3 days) per run if it runs the full 600-epoch cap, which is noticeably slower than my earlier theoretical estimate (14–29 hrs). Real-world overhead (dual-branch decode, both heads, data loading) ate more time than the back-of-envelope math predicted — worth trusting this measured number over my earlier projection going forward.
 
-Both corrections are in place. No training run was started.
+What this changes, practically
+Scope	Recalculated (at 72 hrs/run worst case)
+One run	~72 hrs (3 days), possibly less with early stopping
+Full ablation, CREMI only, n=5 (25 runs)	~1,800 hrs (~75 days / 2.5 months)
+Reduced: n=3 (15 runs)	~1,080 hrs (~45 days)
 
-Cleft labels replace neuron_ids. The sentinel 2^64-1 is background 0, and the remaining ids are dense 1..K.
+Since AC3/AC4 is out of scope for now, your full experiment is CREMI-only — so this 75-day (or 45-day at n=3) number is now your real total, not a fraction of a larger multi-dataset plan.
 
-Volume	Cleft instances	Background voxels	Sentinel voxels
-sample A
-123
-99.77%
-194,871,901
-sample B
-131
-99.76%
-194,851,444
-sample C
-165
-99.28%
-193,910,465
-Those are one below the old 124 / 132 / 166 counts because the sentinel is no longer counted as an instance.
+What needs to happen now — in order
+Don't launch a blind 600-epoch run next. You only have 1 epoch of validation-loss data (0.5887) — no trend yet. Run a longer pilot with validation (e.g., 30 epochs, same command but --max-epochs 30) to see whether val_loss is actually trending down, and roughly where it plateaus. This tells you if early stopping will realistically cut the 3-day budget down, or if it'll run the full 600.
+Given the real 72-hr/run cost, seriously consider dropping to n=3 seeds (not just as a nice-to-have — at n=5 you're looking at 2.5 months just for CREMI). Backfill to n=5 only on full and full_afg afterward, per the earlier mixed-seed strategy.
+Investigate the data-loading bottleneck Cursor flagged ("num_workers=0" despite the code requesting num_workers=4) before committing to the long run — on Windows, PyTorch's DataLoader workers are spawned as separate processes, and if each one has to re-pickle the large in-memory BCD label cache, multiprocessing could be adding overhead rather than removing it. Worth a quick check: does num_workers=4 actually reduce per-epoch time versus num_workers=0 on this dataset? If not, that's your next real speedup lever, cheaper than any epoch-count trick.
 
-Each volume is cut on z and written as its own array. The three samples are not stacked into one block, so a patch cannot cross from A into B.
-
-Split	z	Shape of each sample_{A,B,C} array	Instances touching that range
-data/cremi_train/
-0:70
-(70, 1250, 1250)
-A 72, B 55, C 88
-data/cremi_val/
-70:100
-(30, 1250, 1250)
-A 34, B 60, C 49
-data/cremi_test/
-100:125
-(25, 1250, 1250)
-A 26, B 36, C 50
-The per-slice counts add up to more than 123 / 131 / 165 because some clefts cross a cut and are counted in both slices. Raw is float32, labels are int32.
-
-BCD on sample A’s new cleft labels finished without error: 123 instances in 0.4 seconds. Foreground is 0.23% of the volume, which matches a sparse synapse target.
-
-Checkpoint logging is the one change in src/train.py. The loss and update loop are unchanged. After every epoch it still writes last.pt (resume with --resume), and it now also writes best.pt when validation improves. The log line and train_log.jsonl include eta and remaining_epochs, estimated from the average time of the epochs so far.
-
-okay
-
-i was saying checkpoints for training
-
-cause thats the one that takes time
-
-so now what needs to be done?
-
-Checkpoints for the long run are already in place. After every epoch, train.py overwrites last.pt, writes best.pt when the validation loss improves, and logs eta plus remaining_epochs. Stopping the process and restarting with --resume on that last.pt continues from the next epoch. Do not resume from runs/pilot/last.pt; that checkpoint was trained on neuron ids.
-
-The next step is one training run only: config full, seed 0, on the cleft z-splits.
-
-python src/train.py --data-dir ./data/cremi_train --val-data-dir ./data/cremi_val --dataset cremi --config-name full --seed 0 --out-dir ./runs/cremi_full_seed0 --max-epochs 600 --iterations-per-epoch 100 --early-stop-patience 50
-That uses all three volumes, z 0:70 for training and z 70:100 for validation. Test z 100:125 stays unused until inference. From the pilot, 100 steps is about 7–8 minutes per epoch, so 600 epochs is up to about 3 days unless validation stops it earlier. Watch the first few eta= lines before starting any other config or seed. Switch to Agent mode if you want this run started.
-
-
-
-
-
-do we really need to do 600 epochs?
-
-or is there any no. where those no. of epochs are enough for proper efficiency?
-
-No. 600 is the maximum budget this script uses so the learning-rate schedule matches reference [26]. It is not a measured “enough” point. Nothing in this project has shown that training needs all 600, or that some smaller fixed number is the efficient one.
-
-The learning rate is 0.01 * (1 - epoch / max_epochs)^0.9. If you set --max-epochs 100, the rate falls six times faster than it does with 600. That is a different training schedule, not the same run stopped early.
-
-The mechanism that shortens the run without changing that schedule is early stopping. With --max-epochs 600 and --early-stop-patience 50, training keeps the 600-epoch learning-rate curve, writes best.pt whenever validation loss improves, and stops 50 epochs after it stops improving. The epoch you would report is whatever epoch best.pt came from. That number is not knowable until this cleft split has a validation curve. The old 10-epoch pilot was neuron ids, so it does not answer it.
-
-The one-epoch timing run is still going. Distance maps for train and validation took about 2 seconds total; the 100 training steps have not finished yet.
-
-yeah cxheck for completion of one epoch
-
-The epoch has not finished yet. Distance maps are done, and the 100 training steps are still running. I’ll wait for the epoch line.
-
-The one epoch finished successfully. Wall-clock time was 7.2 minutes (433 seconds), including validation.
-
-[epoch 0] lr=0.01000 train_loss=0.8017 val_loss=0.5887 elapsed=0.12h eta=0.00h remaining_epochs=0 ckpt=runs\cremi_full_seed0\last.pt
-Training complete. Total time: 0.12 hours.
-train_loss is 0.8017 and val_loss is 0.5887. The checkpoint is runs/cremi_full_seed0/last.pt. eta is 0 because this run was capped at 1 epoch. At this epoch’s speed, 600 epochs is about 72 hours if every epoch takes as long as this first one.
-
-The one-epoch CREMI run finished in 7.2 minutes. Training loss was 0.8017 and validation loss was 0.5887. The checkpoint is runs/cremi_full_seed0/last.pt. At that pace, a 600-epoch cap is about 72 hours if every epoch takes as long as this first one.
-
+Want the Cursor prompt for the 30-epoch validation-trend pilot, or for the num_workers diagnostic first?
