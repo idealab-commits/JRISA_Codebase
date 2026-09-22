@@ -62,3 +62,31 @@ Yes. This is only the smoke test: 10 epochs, 20 steps each, one config, one seed
 
 A full manuscript run is 600 epochs and 100 steps, and that would be repeated for every config and seed. On this machine that is days, not hours.
 
+
+
+
+why does it take days?
+
+this is an high end gpu?
+
+A 5060 Ti is a strong consumer card, so the runtime is about the workload, not a weak GPU. I’ll check how large the isotropic branch actually makes each step.
+
+The RTX 5060 Ti is a current 16 GB desktop GPU, and it is busy: it was at full utilization and about 5.4 GB. The schedule is what turns each step into days.
+
+One full step is a 3D network on a patch of 16×384×320, batch size 2. The encoder runs once, then the decoder runs twice, once for the anisotropic branch and once for the isotropic branch. The isotropic branch also runs 7×7×7 convolutions. Backward is included. Mixed precision is already on, so this is not a forgotten CPU or float32 path.
+
+The manuscript loop then multiplies that step:
+
+600 epochs × 100 steps = 60,000 steps for one config and one seed
+5 configs × 3 seeds = 15 runs, about 900,000 steps
+Epoch 0 of the pilot is 20 steps, and it still had not finished after roughly 15 minutes of GPU time. If a step stayed that slow, one 600-epoch run would be weeks. The first epoch also pays CUDA startup, so later steps can be faster. Even at about 5 seconds per step, one run is about 3.5 days, and the 15-run grid is on the order of 7 weeks.
+
+The pilot process finished. I’ll read the log and check whether a checkpoint was written.
+
+The 10-epoch CREMI pilot finished successfully in about 35 minutes. Training itself was 0.33 hours after a 15-minute distance-map setup.
+
+train_loss fell from 21.43 to 12.15. It was not a clean drop every epoch: it rose at epochs 3, 6, and 7, then ended at the lowest value. val_loss is null because no validation directory was set.
+
+runs/pilot/train_log.jsonl is there. A search of that folder did not show last.pt.
+
+
