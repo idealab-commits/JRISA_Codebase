@@ -1,0 +1,106 @@
+Here's the exact, ordered sequence — each step has a copy-paste prompt for Cursor, plus a STOP AND CHECK marker wherever blind automation would be risky (annotation format, GPU memory, convergence) since those genuinely need your eyes before proceeding.
+
+Task 1 — Environment setup
+
+Prompt for Cursor:
+
+Open this JRISA_Codebase project. Create a Python virtual environment named
+"venv", activate it, and install everything in requirements.txt. Then run
+`python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"`
+and show me the output. Do not modify any project files in this step.
+
+✅ Check before continuing: output must say True and name your RTX 5060 Ti / 5090. If False, stop — PyTorch installed the CPU-only build; fix that first (pip install torch --index-url https://download.pytorch.org/whl/cu121 or the CUDA version matching your driver).
+
+Task 2 — Download datasets
+
+Prompt for Cursor:
+
+Run scripts/download_datasets.py with --dataset all --output-dir ./data.
+Show me the full console output, including any errors or manual-step
+instructions it prints (especially for AC3 and MitoEM). Do not edit the
+script's AC3_CHANNEL variable yourself — just report what it tells me to do.
+
+🛑 STOP AND CHECK: read the AC3 and MitoEM instructions it prints. You must manually resolve the AC3 channel name (via bossDB's site) and manually register/download MitoEM before continuing — do not let Cursor guess these.
+
+Task 3 — Inspect raw downloaded data BEFORE writing any conversion code
+
+Prompt for Cursor:
+
+Inspect every file that was downloaded into ./data/cremi and ./data/ac3_ac4.
+For each file, tell me: file format/extension, shape (if it's an array),
+dtype, and — critically — for any file that looks like ground-truth
+annotations, run np.unique() on it and tell me how many distinct positive
+values it contains. Do not write any conversion or training code yet —
+just report findings.
+
+🛑 STOP AND CHECK: this is the single most important checkpoint. If any annotation file shows only 1–2 unique positive values across a large volume, it's likely semantic-only, not instance-labeled — do not proceed to training with it. Come back and tell me what it finds before the next step.
+
+Task 4 — Write the conversion script (only after Task 3's findings are known)
+
+Prompt for Cursor (fill in <FORMAT DETAILS FROM TASK 3> with what it found):
+
+Based on this file format information: <FORMAT DETAILS FROM TASK 3>, write
+a script scripts/convert_to_npy.py that converts the raw downloaded CREMI
+and AC3/AC4 data into the exact layout src/train.py expects: for each
+volume, save <name>_raw.npy (float array) and <name>_labels.npy (int array,
+0=background, distinct positive integers per instance) into ./data/cremi
+and ./data/ac3_ac4 respectively. Do not guess at label semantics — if
+anything is ambiguous, stop and ask me rather than assuming.
+
+Then run it and re-verify with Task 3's inspection approach on the output .npy files.
+
+Task 5 — Pilot smoke test (mandatory before full training)
+
+Prompt for Cursor:
+
+Run exactly this command and show me the full output, including any
+errors:
+python src/train.py --data-dir ./data/ac3_ac4 --dataset ac3ac4 \
+    --config-name full --seed 0 --out-dir ./runs/pilot \
+    --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
+Do not change any arguments. If it errors, show me the full traceback and
+do not attempt to fix it yourself yet — report it to me first.
+
+🛑 STOP AND CHECK: open runs/pilot/train_log.jsonl and confirm train_loss is decreasing across the 10 logged epochs. If it's flat or NaN, do not proceed — something's wrong (likely from Task 3/4) and needs fixing before full training.
+
+Task 6 — Full training runs (only after Task 5 passes)
+
+Prompt for Cursor (run once per config/seed combination — do NOT batch these into one auto-loop without supervision, since each run is 3–7+ hours and you want to catch failures early):
+
+Run exactly this command and let it run to completion, showing progress
+periodically:
+python src/train.py --data-dir ./data/ac3_ac4 --val-data-dir ./data/ac3_ac4 \
+    --dataset ac3ac4 --config-name full --seed 0 \
+    --out-dir ./runs/ac3ac4_full_seed0 \
+    --max-epochs 600 --iterations-per-epoch 100 --early-stop-patience 50
+Do not modify arguments. If GPU memory errors occur, report the exact error
+to me rather than silently reducing batch size yourself.
+
+Repeat for each --config-name in {iso_only, ani_only, ani_iso_semantic_only, full, full_afg} and each --seed (per your mixed n=3/n=5 strategy), changing only --config-name, --seed, and --out-dir each time.
+
+Task 7 — Inference
+
+Prompt for Cursor (after each training run finishes):
+
+Run exactly:
+python src/infer.py --checkpoint ./runs/ac3ac4_full_seed0/best.pt \
+    --volume ./data/ac3_ac4/ac4_raw.npy --dataset ac3ac4 \
+    --out-dir ./predictions/full_seed0/ac4
+Show me the output, including the reported instance count.
+Task 8 — Evaluation
+
+Prompt for Cursor (once all configs/seeds have predictions):
+
+Run exactly:
+python src/evaluate.py --pred-root ./predictions --gt-dir ./data/ac3_ac4 \
+    --configs iso_only ani_only ani_iso_semantic_only full full_afg \
+    --seeds 0 1 2 3 4 --samples ac4 --out results_ac3ac4.json
+Show me the full contents of results_ac3ac4.json when done.
+The one instruction to give Cursor at the very start of every session
+This is a research codebase for a manuscript's experimental results. Do not
+refactor, "improve," or change any equation/algorithm logic in src/ without
+explicitly telling me what you changed and why — the code must match the
+manuscript's Algorithms 1-3 exactly. If something errors, report the error
+and wait for my instruction rather than silently patching around it.
+
+This last one matters most for "no mistakes" — Cursor's agent mode will happily "fix" things by changing your loss function or architecture if it hits an error, which would silently break the correspondence between your code and your paper's equations.
