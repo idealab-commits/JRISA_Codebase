@@ -1,11 +1,13 @@
-Good news first: the pilot actually worked — loss dropped from 21.43 to 12.15 over 10 epochs, so the pipeline (fixed rotation, fixed BCD generation) is functioning correctly.
+The log finished all 10 epochs, so last.pt should have been written every epoch. I’ll list runs\pilot directly and confirm which directory the process was using.
 
-But missing last.pt is a real problem, not expected. My train.py code saves last.pt unconditionally after every single epoch (not just at the end) — so if all 10 epochs ran and logged, there's no code path that should have skipped writing it 10 times in a row.
+last.pt is there. The earlier file search missed it.
 
-Quick things to check, briefly:
+The process was started in C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase, and --out-dir ./runs/pilot resolved to that folder. The console ends with Training complete and exit code 0. There is no permission, disk-full, or torch.save error after the epoch lines. About 41 GB is still free.
 
-Search the exact path, case-sensitive: runs/pilot/last.pt — confirm --out-dir ./runs/pilot is really where it looked, not a different runs/ folder created elsewhere (e.g. if the script was run from a different working directory than expected).
-Check the tail of the console output for a silent torch.save failure — permission error, disk full, or antivirus blocking write to that folder would throw an exception right after the log line printed, which could explain "logs exist but no checkpoint."
-Check the folder's file list directly (dir runs\pilot or ls runs/pilot), not just a search tool — some file-search tools skip .pt files or don't refresh cache immediately after a process just exited.
-
-Ask Cursor to run dir /s runs\pilot (or ls -la runs/pilot) directly and paste the raw output — that'll settle it faster than a search.
+Directory of C:\Users\ADMIN\Downloads\JRISA_Codebase\JRISA_Codebase\runs\pilot
+09/22/2026  05:26 PM    <DIR>          .
+09/22/2026  04:06 PM    <DIR>          ..
+09/22/2026  05:41 PM        61,383,641 last.pt
+09/22/2026  05:41 PM             1,266 train_log.jsonl
+               2 File(s)     61,384,907 bytes
+last.pt is 61,383,641 bytes, written at 5:41 PM, the same minute the log was last updated. best.pt is absent because this pilot had no validation directory, so that save never runs.
