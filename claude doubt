@@ -1,52 +1,64 @@
-Diagnosis: generate_bcd_labels in data.py computes the distance transform on the full-size volume (125×1250×1250) separately for every single instance — and sample A alone has 37,366 instances. SciPy's distance_transform_edt allocates a full-volume-sized working array each call, so it's not just slow (37,366 full-volume passes), it's also why the very first call already blew past available RAM. The bug isn't the shape fix — it's that this function never crops to each instance's bounding box before processing.
+The distance transform is still being run on crops that can be the full volume. I’ll change generate_bcd_labels so each instance is processed only inside its padded bounding box, then rerun the same pilot.
 
-The fix: crop to each instance's bounding box (via scipy.ndimage.find_objects), run erosion/distance-transform on that small crop only, then write the result back into the correct offset of the full-size output array. This fixes both the memory error and what would otherwise be a very slow function (tens of thousands of full-volume operations reduced to tens of thousands of small-crop operations).
+BCD labels finished for all three instances. Training has started; the autocast warning indicates it is running inside the training loop.
 
-Here's the exact Cursor prompt:
+BCD pre-computation took roughly 15 minutes total. Sample B was slower than A even though it had fewer instances because its instances are larger. The first training epoch is still running; logs print after the full epoch completes.
 
-Switch to Agent mode if not already on. The prompt is ready to run.
+Training has run for roughly 28 minutes without completing a single epoch.
 
-Fix a memory bug in generate_bcd_labels() in src/data.py. Do not touch
-model.py, losses.py, decode.py, metrics.py, train.py, infer.py, or
-evaluate.py. Do not change the function's inputs, outputs, or the meaning
-of B/C/D channels -- only change HOW they are computed internally.
+BCD label generation finished after roughly 15 minutes. The training loop has been stuck on epoch 0 for about 13 minutes despite 20 iterations. Output length has not grown, suggesting the process is still running but not making visible progress. I will check nvidia-smi to verify GPU utilization.
 
-Current bug: for every distinct instance id in instance_labels, the function
-calls binary_erosion(mask) and distance_transform_edt(mask) where mask is
-the SAME SIZE AS THE FULL VOLUME (e.g. 125x1250x1250), even though each
-instance only occupies a small region of it. With 37,366 instances in one
-CREMI volume, this means 37,366 full-volume distance-transform calls, each
-allocating large temporary arrays -- this is what caused the
-ArrayMemoryError (trying to allocate 4.37 GiB) and would also make this
-function extremely slow even if memory were not an issue.
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+pid, process_name, used_gpu_memory [MiB]
+14584, C:\Program Files\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe, [N/A]
+8968, C:\Program Files (x86)\Epic Games\Epic Online Services\managedArtifacts\98bc04bc842e4906993fd6d6644ffb8d\EOSOverlayRenderer-Win64-Shipping.exe, [N/A]
+21044, C:\Users\ADMIN\AppData\Local\Programs\Python\Python312\python.exe, [N/A]
+GPU memory metrics are unavailable for Python, likely because the process is not heavily GPU-bound or the driver does not report them.
 
-Required fix: use scipy.ndimage.find_objects(instance_labels) to get each
-instance's bounding-box slice ONCE (a single call returns all bounding
-boxes). For each instance id:
-  1. Get its bounding box slice tuple from the find_objects result.
-  2. Pad that bounding box by 1 voxel on each side (clipped to the volume's
-     actual bounds) so erosion/distance-transform near the crop edge is
-     still correct.
-  3. Extract the small cropped sub-volume: crop = instance_labels[padded_slice]
-  4. Compute mask = (crop == inst_id) on this SMALL crop only.
-  5. Run binary_erosion(mask) and distance_transform_edt(mask) on this small
-     crop -- not the full volume.
-  6. Write the resulting small contour and distance values into the
-     corresponding location of the full-size `contour` and `dist_map`
-     output arrays, using the same padded_slice offset. For contour, use
-     logical OR with whatever is already there (in case of adjacent
-     bounding boxes overlapping at the padding border). For dist_map, use
-     np.maximum with whatever is already there, not += (avoid double-adding
-     in any overlapping padded regions).
+PID 21044 appears to be the Python child process. The missing memory metric is unexpected. I will run the full nvidia-smi output to investigate.
 
-After the fix:
-- Rerun the exact same 10-epoch pilot command as before:
-  python src/train.py --data-dir ./data/cremi --dataset cremi --config-name full --seed 0 --out-dir ./runs/pilot --max-epochs 10 --iterations-per-epoch 20 --early-stop-patience 100
-- Report how long the BCD label pre-computation step took this time (it
-  should now be much faster than before, not slower).
-- Show the full traceback if it fails again.
-- If it finishes, show runs/pilot/train_log.jsonl and tell me whether
-  train_loss decreased across the 10 logged epochs, and confirm
-  runs/pilot/last.pt now exists.
-- Show me the exact diff of the change to src/data.py before considering
-  this complete.
+nvidia-smi
+Tue Sep 22 17:34:48 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 5060 Ti   WDDM  |   00000000:01:00.0 Off |                  N/A |
+| 43%   63C    P1            141W /  180W |    5378MiB /  16311MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A            8968    C+G   ...ayRenderer-Win64-Shipping.exe      N/A      |
+|    0   N/A  N/A           14584    C+G   ...s\Win64\EpicGamesLauncher.exe      N/A      |
+|    0   N/A  N/A           21044      C   ...s\Python\Python312\python.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+The GPU is fully utilized at 100% with 5.3 GB used and 141W power draw.
+
+Training is slow. Epoch 0 has not finished after roughly 15 minutes. At this pace, ten epochs will take about two and a half hours. I will wait longer.
+
+why is the training slow?
+
+The pilot is still working. It looks stuck because train.py prints nothing until all 20 steps of an epoch finish, and epoch 0 has not finished yet.
+
+Two separate stages are slow.
+
+Before the first step, about 15 minutes. Building the boundary and distance maps took 180.5 s for sample A (37,366 instances), 326.3 s for B (1,309), and 401.7 s for C (1,978). A is no longer doing 37,366 full-volume transforms; those fragments are small, so it was the fastest. B and C are slower because their neurons have large bounding boxes. SciPy still allocates a 3-channel float64 working array the size of each crop, and a neuron that spans most of the 125×1250×1250 volume is still a multi-gigabyte transform.
+
+Each training step is a full 3D pass on a large patch. The full config encodes the patch once, then decodes both the anisotropic branch and the isotropic branch. The patch is 16×384×320 with batch size 2, and the network goes up to 256 channels of 3×3×3 convolutions. The GPU was at 100% utilization and about 5.4 GB, so this is compute, not a hang. Data loading is also on the main process (num_workers=0), so the next crop is cut from the three full volumes only after the GPU step returns.
+
+At this rate the 10-epoch pilot is on the order of a couple of hours, not minutes. A 600-epoch run at 100 steps per epoch would be roughly 30 times longer than these 10 epochs of 20 steps.
+
+thats a lot, aint it?
+
+Yes. This is only the smoke test: 10 epochs, 20 steps each, one config, one seed. It has already been running for about 32 minutes, and epoch 0 has still not printed. About 15 of those minutes were the distance-map setup. The rest is the GPU working through the first 20 steps.
+
+A full manuscript run is 600 epochs and 100 steps, and that would be repeated for every config and seed. On this machine that is days, not hours.
+
