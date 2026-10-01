@@ -79,8 +79,12 @@ def main():
     patch_size = (16, 384, 320) if args.dataset == "cremi" else (16, 320, 320)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = JRISA(in_channels=1, num_sem_classes=2, afg_enabled=False).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device)
+    # A full_afg checkpoint contains the gate's weights, so the model must be built with the
+    # gate to load it. The pseudo-isotropic module h is never used here (inference runs the
+    # anisotropic branch only, training_mode=False).
+    afg = ckpt.get("args", {}).get("config_name") == "full_afg"
+    model = JRISA(in_channels=1, num_sem_classes=2, afg_enabled=afg).to(device)
     model.load_state_dict(ckpt["model"])
 
     volume = np.load(args.volume).astype(np.float32)
