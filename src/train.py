@@ -40,6 +40,20 @@ CONFIGS = {
 }
 
 
+def loss_weights(cfg, base_gamma=1.0, base_lam=0.5):
+    """Turns a config's switches into lambda / gamma of Eq. (15).
+    lambda = 0 trains the anisotropic branch only, lambda = 1 the isotropic branch only,
+    gamma = 0 drops the instance terms (semantic only, ReIsoSeg [26]'s scope)."""
+    if cfg["use_ani"] and not cfg["use_iso"]:
+        lam = 0.0
+    elif cfg["use_iso"] and not cfg["use_ani"]:
+        lam = 1.0
+    else:
+        lam = base_lam
+    gamma = base_gamma if cfg["use_inst"] else 0.0
+    return lam, gamma
+
+
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -75,7 +89,7 @@ def load_volumes(data_dir):
     return volumes
 
 
-def validate(model, val_loader, device, cfg):
+def validate(model, val_loader, device, lam, gamma):
     model.eval()
     losses = []
     with torch.no_grad():
@@ -83,7 +97,7 @@ def validate(model, val_loader, device, cfg):
             image = batch["image"].to(device)
             targets = {k: batch[k].to(device) for k in ("sem", "inst_b", "inst_c", "inst_d")}
             outputs = model(image, training_mode=True)
-            loss, _ = total_loss(outputs, targets, lam=0.5, gamma=1.0)
+            loss, _ = total_loss(outputs, targets, lam=lam, gamma=gamma)
             losses.append(loss.item())
     model.train()
     return float(np.mean(losses)) if losses else float("inf")
@@ -120,6 +134,8 @@ def main():
               "on CPU (see the earlier feasibility discussion). Proceeding anyway.")
 
     cfg = CONFIGS[args.config_name]
+    lam, gamma = loss_weights(cfg, base_gamma=args.gamma)
+    print(f"Loss weights for {args.config_name}: lambda={lam} gamma={gamma}")
     model = JRISA(in_channels=1, num_sem_classes=2, z_sampling=z_sampling,
                   afg_enabled=cfg["afg"]).to(device)
 
@@ -175,7 +191,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 outputs = model(image, training_mode=True)
-                loss, loss_parts = total_loss(outputs, targets, lam=0.5, gamma=args.gamma)
+                loss, loss_parts = total_loss(outputs, targets, lam=lam, gamma=gamma)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -183,7 +199,7 @@ def main():
             epoch_losses.append(loss.item())
 
         train_loss = float(np.mean(epoch_losses))
-        val_loss = validate(model, val_loader, device, cfg) if val_loader else None
+        val_loss = validate(model, val_loader, device, lam, gamma) if val_loader else None
         elapsed = time.time() - t_start
 
         log_entry = {"epoch": epoch, "lr": lr, "train_loss": train_loss,
