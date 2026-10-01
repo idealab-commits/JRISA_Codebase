@@ -1,108 +1,123 @@
 # -*- coding: utf-8 -*-
 """
-infer.py -- Algorithm 2 (Inference and Instance Decoding).
+evaluate.py -- Algorithm 3 (Ablation and Dual-Level Evaluation Protocol).
 
-Runs the trained model on a full volume via overlapping sliding-window
-tiling (since a full volume is far larger than one training patch), then
-decodes instances via marker-controlled watershed (Eq. 10). Only the
-anisotropic branch is computed -- h and AFG are discarded, per Algorithm 2.
+Aggregates per-seed predictions into the metric tables from Section III-K,
+runs paired t-tests between adjacent ablation configurations (Section III-L),
+and writes a JSON results file ready to feed into the two results-figure
+templates built earlier (qualitative/quantitative).
 
 Usage:
-    python infer.py --checkpoint ./runs/ac3ac4_full_seed0/best.pt \\
-        --volume ./data/ac3_ac4/ac4_raw.npy --out-dir ./predictions/ac4_full_seed0
+    python evaluate.py --pred-root ./predictions --gt-dir ./data/ac3_ac4 \\
+        --configs iso_only ani_only ani_iso_semantic_only full full_afg \\
+        --seeds 0 1 2 3 4 --out results_ac3ac4.json
 """
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+from scipy import stats
 
-from model import JRISA
-from decode import decode_instances
+from metrics import dice_score, ad_score, hungarian_match, precision_recall_accuracy, classify_associations
 
 
-def sliding_window_infer(model, volume, patch_size, device, overlap=0.25):
-    """Overlapping tiled inference with averaged logits in overlap regions."""
-    d, h, w = volume.shape
-    pd, ph, pw = patch_size
-    stride = tuple(max(1, int(p * (1 - overlap))) for p in patch_size)
+def evaluate_one_prediction(pred_dir, gt_dir, sample_name):
+    sem_pred = np.load(Path(pred_dir) / "sem_pred.npy")
+    inst_pred = np.load(Path(pred_dir) / "instances.npy")
+    inst_gt = np.load(Path(gt_dir) / f"{sample_name}_labels.npy")
+    sem_gt_path = Path(gt_dir) / f"{sample_name}_sem_gt.npy"
+    # The semantic target is "any labelled object", so derive it when no _sem_gt file was saved.
+    sem_gt = np.load(sem_gt_path) if sem_gt_path.exists() else (inst_gt > 0)
 
-    sem_accum = torch.zeros((2, d, h, w))
-    inst_accum = torch.zeros((3, d, h, w))
-    count = torch.zeros((1, d, h, w))
+    dsc = dice_score(sem_pred > 0, sem_gt > 0)
+    ad = ad_score(sem_pred > 0, sem_gt > 0)
 
-    z_starts = list(range(0, max(d - pd, 0) + 1, stride[0])) or [0]
-    y_starts = list(range(0, max(h - ph, 0) + 1, stride[1])) or [0]
-    x_starts = list(range(0, max(w - pw, 0) + 1, stride[2])) or [0]
-    if z_starts[-1] + pd < d:
-        z_starts.append(d - pd)
-    if y_starts[-1] + ph < h:
-        y_starts.append(h - ph)
-    if x_starts[-1] + pw < w:
-        x_starts.append(w - pw)
+    matched, unmatched_pred, unmatched_gt = hungarian_match(inst_pred, inst_gt, T=0.75)
+    precision, recall, accuracy = precision_recall_accuracy(
+        len(matched), len(matched) + len(unmatched_pred), len(matched) + len(unmatched_gt)
+    )
+    _, assoc_pct = classify_associations(inst_pred, inst_gt, T=0.75)
 
-    model.eval()
-    with torch.no_grad():
-        for z0 in z_starts:
-            for y0 in y_starts:
-                for x0 in x_starts:
-                    patch = volume[z0:z0 + pd, y0:y0 + ph, x0:x0 + pw]
-                    patch = (patch - patch.min()) / (patch.max() - patch.min() + 1e-8)
-                    tensor = torch.from_numpy(patch[None, None]).float().to(device)
-                    out = model(tensor, training_mode=False)
-                    sem_accum[:, z0:z0 + pd, y0:y0 + ph, x0:x0 + pw] += out["sem"][0].cpu()
-                    inst_b = out["inst_b"][0].cpu()
-                    inst_c = out["inst_c"][0].cpu()
-                    inst_d = out["inst_d"][0].cpu()
-                    inst_accum[0:1, z0:z0 + pd, y0:y0 + ph, x0:x0 + pw] += inst_b
-                    inst_accum[1:2, z0:z0 + pd, y0:y0 + ph, x0:x0 + pw] += inst_c
-                    inst_accum[2:3, z0:z0 + pd, y0:y0 + ph, x0:x0 + pw] += inst_d
-                    count[:, z0:z0 + pd, y0:y0 + ph, x0:x0 + pw] += 1
+    return {
+        "dice": dsc, "ad_score": ad,
+        "precision": precision, "recall": recall, "accuracy": accuracy,
+        "association_pct": assoc_pct,
+    }
 
-    count = torch.clamp(count, min=1)
-    sem_avg = sem_accum / count
-    inst_avg = inst_accum / count
-    return sem_avg.numpy(), inst_avg.numpy()
+
+def aggregate_config(pred_root, gt_dir, config_name, seeds, sample_names):
+    per_seed_scores = {"dice": [], "ad_score": [], "precision": [], "recall": [], "accuracy": []}
+    assoc_accum = []
+
+    for seed in seeds:
+        seed_scores = {k: [] for k in per_seed_scores}
+        for sample in sample_names:
+            pred_dir = Path(pred_root) / f"{config_name}_seed{seed}" / sample
+            if not pred_dir.exists():
+                print(f"  [warn] missing prediction dir {pred_dir}, skipping")
+                continue
+            res = evaluate_one_prediction(pred_dir, gt_dir, sample)
+            for k in seed_scores:
+                seed_scores[k].append(res[k])
+            assoc_accum.append(res["association_pct"])
+        for k in per_seed_scores:
+            per_seed_scores[k].append(float(np.mean(seed_scores[k])) if seed_scores[k] else float("nan"))
+
+    summary = {}
+    for k, vals in per_seed_scores.items():
+        vals = np.array(vals)
+        summary[k] = {"mean": float(np.nanmean(vals)), "std": float(np.nanstd(vals)), "per_seed": vals.tolist()}
+
+    if assoc_accum:
+        keys = assoc_accum[0].keys()
+        summary["association_pct"] = {k: float(np.mean([a[k] for a in assoc_accum])) for k in keys}
+
+    return summary, per_seed_scores
+
+
+def paired_ttest(scores_a, scores_b):
+    a, b = np.array(scores_a), np.array(scores_b)
+    n = min(len(a), len(b))
+    if n < 2:
+        return None
+    stat, p = stats.ttest_rel(a[:n], b[:n])
+    return float(p)
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", required=True)
-    p.add_argument("--volume", required=True, help="Path to a <name>_raw.npy volume")
-    p.add_argument("--dataset", choices=["ac3ac4", "cremi", "mitoem"], default="ac3ac4")
-    p.add_argument("--out-dir", required=True)
-    p.add_argument("--tau-b", type=float, default=0.5)
-    p.add_argument("--tau-c", type=float, default=0.5)
+    p.add_argument("--pred-root", required=True)
+    p.add_argument("--gt-dir", required=True)
+    p.add_argument("--configs", nargs="+", required=True,
+                   help="Ablation ordering, e.g. iso_only ani_only ani_iso_semantic_only full full_afg")
+    p.add_argument("--seeds", nargs="+", type=int, required=True)
+    p.add_argument("--samples", nargs="+", required=True,
+                   help="Sample/volume names to evaluate on, e.g. ac4")
+    p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    patch_size = (16, 384, 320) if args.dataset == "cremi" else (16, 320, 320)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    results = {"configs": {}, "significance": {}}
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
-    # A full_afg checkpoint contains the gate's weights, so the model must be built with the
-    # gate to load it. The pseudo-isotropic module h is never used here (inference runs the
-    # anisotropic branch only, training_mode=False).
-    afg = ckpt.get("args", {}).get("config_name") == "full_afg"
-    model = JRISA(in_channels=1, num_sem_classes=2, afg_enabled=afg).to(device)
-    model.load_state_dict(ckpt["model"])
+    per_config_dice = {}
+    for cfg in args.configs:
+        print(f"Evaluating config: {cfg}")
+        summary, per_seed = aggregate_config(args.pred_root, args.gt_dir, cfg, args.seeds, args.samples)
+        results["configs"][cfg] = summary
+        per_config_dice[cfg] = per_seed["dice"]
 
-    volume = np.load(args.volume).astype(np.float32)
-    print(f"Running sliding-window inference on volume shape {volume.shape} ...")
-    sem_logits, inst_out = sliding_window_infer(model, volume, patch_size, device)
+    # paired t-test between adjacent configs in the given ablation ordering (Section III-L)
+    for i in range(len(args.configs) - 1):
+        a, b = args.configs[i], args.configs[i + 1]
+        p_val = paired_ttest(per_config_dice[a], per_config_dice[b])
+        results["significance"][f"{a}_vs_{b}"] = {
+            "p_value": p_val,
+            "significant_at_0.05": (p_val is not None and p_val <= 0.05),
+        }
 
-    sem_pred = np.argmax(sem_logits, axis=0).astype(np.uint8)
-    b_prob = 1 / (1 + np.exp(-inst_out[0]))  # sigmoid
-    c_prob = 1 / (1 + np.exp(-inst_out[1]))
-    d_pred = inst_out[2]
-
-    instances = decode_instances(b_prob, c_prob, d_pred, tau_b=args.tau_b, tau_c=args.tau_c)
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(out_dir / "sem_pred.npy", sem_pred)
-    np.save(out_dir / "instances.npy", instances)
-    print(f"Saved semantic map and {instances.max()} instances to {out_dir}")
+    with open(args.out, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Wrote results to {args.out}")
 
 
 if __name__ == "__main__":
