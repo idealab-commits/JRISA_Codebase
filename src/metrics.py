@@ -20,11 +20,40 @@ def iou(mask_a, mask_b):
     return inter / union if union > 0 else 0.0
 
 
-def _instance_masks(label_vol):
-    """Returns {instance_id: boolean_mask} for a label volume, skipping 0 (background)."""
-    ids = np.unique(label_vol)
-    ids = ids[ids != 0]
-    return {int(i): (label_vol == i) for i in ids}
+def _overlap_table(pred_labels, gt_labels):
+    """IoU (Eq. 16) between every predicted and every ground-truth instance, computed in ONE
+    pass over the volume via a contingency table -- the same IoU values as comparing masks
+    pairwise, but without building a full-size mask per instance (which needs ~40 GB of RAM
+    on AC4 and far more on MitoEM).
+
+    Returns pred_ids, gt_ids, and a dense IoU matrix of shape (len(pred_ids), len(gt_ids))."""
+    pred_ids, pred_sizes = np.unique(pred_labels, return_counts=True)
+    gt_ids, gt_sizes = np.unique(gt_labels, return_counts=True)
+    keep_p, keep_g = pred_ids != 0, gt_ids != 0
+    pred_ids, pred_sizes = pred_ids[keep_p], pred_sizes[keep_p]
+    gt_ids, gt_sizes = gt_ids[keep_g], gt_sizes[keep_g]
+    iou_mat = np.zeros((len(pred_ids), len(gt_ids)), dtype=np.float64)
+    if len(pred_ids) == 0 or len(gt_ids) == 0:
+        return pred_ids, gt_ids, iou_mat
+
+    pair_keys, pair_counts = [], []
+    n_gt = np.int64(len(gt_ids))
+    for z in range(pred_labels.shape[0]):           # slice by slice keeps memory small
+        p, g = pred_labels[z].ravel(), gt_labels[z].ravel()
+        both = (p != 0) & (g != 0)
+        if not both.any():
+            continue
+        pi = np.searchsorted(pred_ids, p[both]).astype(np.int64)
+        gi = np.searchsorted(gt_ids, g[both]).astype(np.int64)
+        keys, counts = np.unique(pi * n_gt + gi, return_counts=True)
+        pair_keys.append(keys)
+        pair_counts.append(counts)
+    if pair_keys:
+        keys, inverse = np.unique(np.concatenate(pair_keys), return_inverse=True)
+        inter = np.bincount(inverse, weights=np.concatenate(pair_counts))
+        pi, gi = keys // n_gt, keys % n_gt
+        iou_mat[pi, gi] = inter / (pred_sizes[pi] + gt_sizes[gi] - inter)
+    return pred_ids, gt_ids, iou_mat
 
 
 def dice_score(pred_mask, gt_mask, eps=1e-5):
@@ -60,9 +89,8 @@ def hungarian_match(pred_labels, gt_labels, T=0.75, N=None):
 
     Returns: matched pairs [(pred_id, gt_id, iou)], unmatched_pred_ids, unmatched_gt_ids
     """
-    pred_masks = _instance_masks(pred_labels)
-    gt_masks = _instance_masks(gt_labels)
-    pred_ids, gt_ids = list(pred_masks.keys()), list(gt_masks.keys())
+    pred_ids, gt_ids, iou_table = _overlap_table(pred_labels, gt_labels)
+    pred_ids, gt_ids = [int(i) for i in pred_ids], [int(i) for i in gt_ids]
 
     if N is None:
         N = max(len(pred_ids), len(gt_ids), 1)
@@ -70,15 +98,7 @@ def hungarian_match(pred_labels, gt_labels, T=0.75, N=None):
     if len(pred_ids) == 0 or len(gt_ids) == 0:
         return [], pred_ids, gt_ids
 
-    cost = np.zeros((len(pred_ids), len(gt_ids)))
-    iou_table = np.zeros_like(cost)
-    for i, pid in enumerate(pred_ids):
-        p_bbox_slices = find_objects(pred_labels == pid)
-        for j, gid in enumerate(gt_ids):
-            v = iou(pred_masks[pid], gt_masks[gid])
-            iou_table[i, j] = v
-            cost[i, j] = -float(v >= T) - v / (2 * N)
-
+    cost = -(iou_table >= T).astype(np.float64) - iou_table / (2 * N)   # Eq. (17)
     row_ind, col_ind = linear_sum_assignment(cost)
 
     matched, matched_pred, matched_gt = [], set(), set()
@@ -114,16 +134,13 @@ def classify_associations(pred_labels, gt_labels, T=0.75, overlap_T=0.10):
     it has (IoU with any candidate >= overlap_T, a looser threshold than the
     T=0.75 matching threshold, used only to detect fragmentation/merging).
     """
-    pred_masks = _instance_masks(pred_labels)
-    gt_masks = _instance_masks(gt_labels)
-
-    gt_to_preds = {g: [] for g in gt_masks}
-    pred_to_gts = {p: [] for p in pred_masks}
-    for g, gm in gt_masks.items():
-        for p, pm in pred_masks.items():
-            if iou(gm, pm) >= overlap_T:
-                gt_to_preds[g].append(p)
-                pred_to_gts[p].append(g)
+    pred_ids, gt_ids, iou_table = _overlap_table(pred_labels, gt_labels)
+    gt_to_preds = {int(g): [] for g in gt_ids}
+    pred_to_gts = {int(p): [] for p in pred_ids}
+    for i, j in zip(*np.nonzero(iou_table >= overlap_T)):
+        p, g = int(pred_ids[i]), int(gt_ids[j])
+        gt_to_preds[g].append(p)
+        pred_to_gts[p].append(g)
 
     counts = {"one_to_one": 0, "over_segmentation": 0, "under_segmentation": 0,
               "missing": 0, "background": 0, "many_to_many": 0}
