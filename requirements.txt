@@ -1,0 +1,10 @@
+# Dataset download dependencies (Section III-I sources)
+huggingface_hub>=0.20.0   # CREMI (MedOtter/CREMI mirror)
+intern>=1.4.0             # AC3/AC4 (bossDB client)
+
+# Training / inference / evaluation dependencies
+torch>=2.1.0              # install the CUDA build matching your GPU driver, see:
+                          # https://pytorch.org/get-started/locally/
+numpy>=1.24.0
+scipy>=1.11.0
+scikit-image>=0.22.0
