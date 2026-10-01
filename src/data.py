@@ -18,7 +18,7 @@ annotation source before proceeding, don't suppress this check.
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from scipy.ndimage import distance_transform_edt, binary_erosion
+from scipy.ndimage import distance_transform_edt, binary_erosion, find_objects
 
 
 class AnnotationFormatError(RuntimeError):
@@ -62,17 +62,24 @@ def generate_bcd_labels(instance_labels: np.ndarray):
 
     foreground = (instance_labels > 0).astype(np.float32)
 
-    contour = np.zeros_like(foreground)
-    dist_map = np.zeros_like(foreground)
-    for inst_id in unique_ids:
-        if inst_id == 0:
+    # Each instance is processed only inside its own bounding box padded by 1 voxel. The ring
+    # of padding is background for that instance, so erosion and the distance transform give
+    # exactly the same values as on the full volume -- but without allocating a full-volume
+    # array per instance (that version ran out of memory on CREMI's 37k-instance volumes).
+    contour = np.zeros(instance_labels.shape, dtype=bool)
+    dist_map = np.zeros(instance_labels.shape, dtype=np.float32)
+    boxes = find_objects(instance_labels)          # boxes[i] is the bbox of label i+1, or None
+    for idx, box in enumerate(boxes):
+        if box is None:
             continue
-        mask = instance_labels == inst_id
-        eroded = binary_erosion(mask)
-        contour = np.logical_or(contour, np.logical_and(mask, ~eroded))
-        dist_map += distance_transform_edt(mask)
+        inst_id = idx + 1
+        padded = tuple(slice(max(s.start - 1, 0), min(s.stop + 1, n))
+                       for s, n in zip(box, instance_labels.shape))
+        mask = instance_labels[padded] == inst_id
+        contour[padded] |= mask & ~binary_erosion(mask)
+        np.maximum(dist_map[padded], distance_transform_edt(mask), out=dist_map[padded])
 
-    return foreground, contour.astype(np.float32), dist_map.astype(np.float32)
+    return foreground, contour.astype(np.float32), dist_map
 
 
 class EMVolumeDataset(Dataset):
@@ -158,7 +165,12 @@ class EMVolumeDataset(Dataset):
             raw, sem, b, c, d = (np.flip(a, axis=1).copy() for a in (raw, sem, b, c, d))
         if np.random.rand() < 0.5:
             raw, sem, b, c, d = (np.flip(a, axis=2).copy() for a in (raw, sem, b, c, d))
-        k = np.random.randint(0, 4)
+        # 90/270 deg swaps H and W. Square patches can use all four angles; non-square
+        # patches (CREMI 384x320) stay at 0 or 180 so every patch in a batch has the same shape.
+        if raw.shape[1] == raw.shape[2]:
+            k = np.random.randint(0, 4)
+        else:
+            k = int(np.random.choice([0, 2]))
         if k > 0:
             raw, sem, b, c, d = (np.rot90(a, k, axes=(1, 2)).copy() for a in (raw, sem, b, c, d))
         return raw, sem, b, c, d
