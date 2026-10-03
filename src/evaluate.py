@@ -25,8 +25,10 @@ from metrics import dice_score, ad_score, hungarian_match, precision_recall_accu
 def evaluate_one_prediction(pred_dir, gt_dir, sample_name):
     sem_pred = np.load(Path(pred_dir) / "sem_pred.npy")
     inst_pred = np.load(Path(pred_dir) / "instances.npy")
-    sem_gt = np.load(Path(gt_dir) / f"{sample_name}_sem_gt.npy")
     inst_gt = np.load(Path(gt_dir) / f"{sample_name}_labels.npy")
+    sem_gt_path = Path(gt_dir) / f"{sample_name}_sem_gt.npy"
+    # The semantic target is "any labelled object", so derive it when no _sem_gt file was saved.
+    sem_gt = np.load(sem_gt_path) if sem_gt_path.exists() else (inst_gt > 0)
 
     dsc = dice_score(sem_pred > 0, sem_gt > 0)
     ad = ad_score(sem_pred > 0, sem_gt > 0)

@@ -28,6 +28,21 @@ pip install -r requirements.txt
 # https://pytorch.org/get-started/locally/
 ```
 
+## 0. Get all data in one step (recommended)
+
+Double-click `run_data_setup.bat`, or from the project root run:
+
+```bash
+python scripts/prepare_data.py
+```
+
+This downloads CREMI and AC4, converts them, applies the manuscript's z-splits
+(CREMI 70/30/25 per volume), writes `<name>_raw.npy` / `_labels.npy` /
+`_sem_gt.npy` for every volume, and ends with a check table that flags any
+broken volume (e.g. all zeros). It is safe to re-run; finished steps are
+skipped. When it finishes you can go straight to training (step 4). Steps 1-2
+below describe the older manual route.
+
 ## 1. Download datasets
 
 ```bash
